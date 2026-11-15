@@ -10,6 +10,8 @@ from lib import tabla as t
 
 COURSE_ID = re.compile(r"^crs_[0-9A-HJKMNP-TV-Z]{26}$")
 ASSIGNMENT_ID = re.compile(r"^asg_[0-9A-HJKMNP-TV-Z]{26}$")
+SUBMISSION_ID = re.compile(r"^sbm_[0-9A-HJKMNP-TV-Z]{26}$")
+FILE_ID = re.compile(r"^fil_[0-9A-HJKMNP-TV-Z]{26}$")
 LIMITE_DEFECTO, LIMITE_MAXIMO = 20, 100
 
 
@@ -34,6 +36,22 @@ def sk_tarea_de_curso(course_id: str, due_at: str = "", assignment_id: str = "")
     return f"COURSEASSIGN#{course_id}#{due_at}#{assignment_id}"
 
 
+def sk_entrega(submission_id: str) -> str:
+    return f"SUBMIT#{submission_id}"
+
+
+def sk_entrega_de_tarea(assignment_id: str, student_id: str = "", submission_id: str = "") -> str:
+    """Índice de las entregas de una tarea; con student_id, solo las de ese alumno."""
+    if not student_id:
+        return f"ASSIGNSUBMIT#{assignment_id}#"
+    return f"ASSIGNSUBMIT#{assignment_id}#{student_id}#{submission_id}"
+
+
+def sk_intentos(assignment_id: str, student_id: str) -> str:
+    """Contador de entregas de un alumno en una tarea (attempt = entregas previas + 1)."""
+    return f"ATTEMPTS#{assignment_id}#{student_id}"
+
+
 def matricula(tenant_id: str, course_id: str, user_id: str) -> dict | None:
     clave = {"tenant_id": tenant_id, "sk": sk_matricula(course_id, user_id)}
     return t.tabla().get_item(Key=clave).get("Item")
@@ -51,6 +69,13 @@ def leer_tarea(tenant_id: str, assignment_id: str, consistente: bool = False) ->
     return t.tabla().get_item(Key=clave, ConsistentRead=consistente).get("Item")
 
 
+def leer_entrega(tenant_id: str, submission_id: str, consistente: bool = False) -> dict | None:
+    if not SUBMISSION_ID.match(submission_id or ""):
+        return None
+    clave = {"tenant_id": tenant_id, "sk": sk_entrega(submission_id)}
+    return t.tabla().get_item(Key=clave, ConsistentRead=consistente).get("Item")
+
+
 def numero(valor):
     """DynamoDB devuelve Decimal; el contrato pide number (20, no "20")."""
     if isinstance(valor, Decimal):
@@ -65,6 +90,19 @@ def a_tarea(item: dict) -> dict:
     if item.get("instructions") is not None:
         tarea["instructions"] = item["instructions"]
     return tarea
+
+
+def a_entrega(item: dict, con_nota: bool = True) -> dict:
+    """con_nota=False oculta score y feedback: el alumno ve su nota cuando ms-calificaciones la publica."""
+    entrega = {k: item[k] for k in ("submissionId", "assignmentId", "studentId", "status", "submittedAt")}
+    entrega["attempt"] = numero(item["attempt"])
+    entrega["fileIds"] = list(item["fileIds"])
+    entrega["late"] = bool(item["late"])
+    entrega["score"] = numero(item.get("score")) if con_nota else None
+    entrega["feedback"] = item.get("feedback") if con_nota else None
+    if item.get("comment") is not None:
+        entrega["comment"] = item["comment"]
+    return entrega
 
 
 def param(event: dict, nombre: str) -> str:

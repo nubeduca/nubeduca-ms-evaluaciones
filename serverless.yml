@@ -49,6 +49,14 @@ functions:
       - http: { path: '/assignments/{assignmentId}', method: patch, cors: true }
       - http: { path: '/assignments/{assignmentId}/publish', method: post, cors: true }
 
+  entregas:
+    handler: api/entregas.lambda_handler
+    events:
+      - http: { path: '/assignments/{assignmentId}/submissions', method: get, cors: true }
+      - http: { path: '/assignments/{assignmentId}/submissions', method: post, cors: true }
+      - http: { path: '/submissions/{submissionId}', method: get, cors: true }
+      - http: { path: '/submissions/{submissionId}/grade', method: post, cors: true }
+      
   # Outbox → bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
   relayOutbox:
     handler: relay/stream_a_bus.lambda_handler
