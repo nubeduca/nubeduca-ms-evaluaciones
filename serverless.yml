@@ -39,6 +39,15 @@ functions:
     handler: api/salud.lambda_handler
     events:
       - http: { path: /health, method: get, cors: true }
+  #   authorizer: { type: COGNITO_USER_POOLS, arn: ${param:userPoolArn} }
+  tareas:
+    handler: api/tareas.lambda_handler
+    events:
+      - http: { path: '/courses/{courseId}/assignments', method: get, cors: true }
+      - http: { path: '/courses/{courseId}/assignments', method: post, cors: true }
+      - http: { path: '/assignments/{assignmentId}', method: get, cors: true }
+      - http: { path: '/assignments/{assignmentId}', method: patch, cors: true }
+      - http: { path: '/assignments/{assignmentId}/publish', method: post, cors: true }
 
   # Outbox → bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
   relayOutbox:

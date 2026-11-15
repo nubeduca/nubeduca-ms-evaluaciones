@@ -1,3 +1,4 @@
+import json
 import sys
 from pathlib import Path
 
@@ -19,6 +20,31 @@ ALUMNO = "a18577e2-e005-4a49-a29e-755dbf08f5b6"
 
 def token(rol="TEACHER", tenant=TENANT, user=DOCENTE):
     return {"Authorization": f"Bearer mock.{tenant}.{rol}.{user}"}
+
+
+def peticion(metodo, headers, body=None, path_params=None, query=None, resource=None):
+    return {
+        "httpMethod": metodo,
+        "resource": resource,
+        "headers": headers,
+        "body": json.dumps(body) if body is not None else None,
+        "pathParameters": path_params,
+        "queryStringParameters": query,
+        "requestContext": {"requestId": "req-test"},
+    }
+
+
+def items(prefijo, tenant=TENANT):
+    resp = t.tabla().query(
+        KeyConditionExpression="tenant_id = :t AND begins_with(sk, :p)",
+        ExpressionAttributeValues={":t": tenant, ":p": prefijo},
+    )
+    return resp["Items"]
+
+
+def eventos(tenant=TENANT):
+    return [json.loads(i["detail"]) | {"_detailType": i["detailType"], "_source": i["source"]}
+            for i in items("EVENTO#", tenant)]
 
 
 @pytest.fixture
