@@ -1,0 +1,214 @@
+service: nubeduca-ms-evaluaciones
+
+params:
+  default:
+    outbox: lambda
+    authMode: mock
+
+custom:
+  busName: ${param:busName, ssm:/nubeduca/${sls:stage}/bus-name, 'lms'}
+  relayEncendido:
+    lambda: true
+    pipe: false
+
+provider:
+  name: aws
+  runtime: python3.13
+  region: us-east-1
+  stage: ${opt:stage, 'dev'}
+  memorySize: 256
+  timeout: 20
+  iam:
+    role: arn:aws:iam::${aws:accountId}:role/LabRole   # Learner Lab no deja crear roles
+  # PLT-06: trazas de API Gateway y Lambda en X-Ray.
+  tracing:
+    apiGateway: true
+    lambda: true
+  environment:
+    SERVICIO: ms-evaluaciones
+    EVENT_SOURCE: lms.assessment
+    TABLA: ${sls:stage}-t_evaluaciones
+    EVENT_BUS: ${self:custom.busName}
+    AUTH_MODE: ${param:authMode}
+
+package:
+  patterns:
+    - '!tests/**'
+    - '!scripts/**'
+    - '!.venv/**'
+    - '!requirements-dev.txt'
+
+functions:
+  salud:
+    handler: api/salud.lambda_handler
+    events:
+      - http: { path: /health, method: get, cors: true }
+  #   authorizer: { type: COGNITO_USER_POOLS, arn: ${param:userPoolArn} }
+  tareas:
+    handler: api/tareas.lambda_handler
+    events:
+      - http: { path: '/courses/{courseId}/assignments', method: get, cors: true }
+      - http: { path: '/courses/{courseId}/assignments', method: post, cors: true }
+      - http: { path: '/assignments/{assignmentId}', method: get, cors: true }
+      - http: { path: '/assignments/{assignmentId}', method: patch, cors: true }
+      - http: { path: '/assignments/{assignmentId}/publish', method: post, cors: true }
+
+  entregas:
+    handler: api/entregas.lambda_handler
+    events:
+      - http: { path: '/assignments/{assignmentId}/submissions', method: get, cors: true }
+      - http: { path: '/assignments/{assignmentId}/submissions', method: post, cors: true }
+      - http: { path: '/submissions/{submissionId}', method: get, cors: true }
+      - http: { path: '/submissions/{submissionId}/grade', method: post, cors: true }
+
+  # Outbox → bus (solo si outbox=lambda). Lee el Stream y publica los EVENTO#.
+  relayOutbox:
+    handler: relay/stream_a_bus.lambda_handler
+    events:
+      - stream:
+          type: dynamodb
+          arn: !GetAtt Tabla.StreamArn
+          enabled: ${self:custom.relayEncendido.${param:outbox}}
+          startingPosition: LATEST
+          batchSize: 10
+          maximumRetryAttempts: 10
+          filterPatterns:
+            - eventName: [INSERT]
+              dynamodb:
+                Keys:
+                  sk:
+                    S: [{ prefix: 'EVENTO#' }]
+
+  # Regla del bus → cola → este Lambda. Una regla y una cola por consumidor.
+  consumidor:
+    handler: consumidores/eventos.lambda_handler
+    events:
+      - sqs:
+          arn: !GetAtt ColaEventos.Arn
+          batchSize: 10
+          functionResponseType: ReportBatchItemFailures
+
+resources:
+  Conditions:
+    UsarPipe: !Equals ['${param:outbox}', 'pipe']
+
+  Resources:
+    # Tabla única: PK tenant_id + sk. El Stream alimenta el outbox.
+    Tabla:
+      Type: AWS::DynamoDB::Table
+      Properties:
+        TableName: ${sls:stage}-t_evaluaciones
+        BillingMode: PAY_PER_REQUEST
+        AttributeDefinitions:
+          - { AttributeName: tenant_id, AttributeType: S }
+          - { AttributeName: sk, AttributeType: S }
+        KeySchema:
+          - { AttributeName: tenant_id, KeyType: HASH }
+          - { AttributeName: sk, KeyType: RANGE }
+        StreamSpecification:
+          StreamViewType: NEW_IMAGE
+        TimeToLiveSpecification:
+          AttributeName: ttl
+          Enabled: true
+
+    # Outbox con EventBridge Pipes (outbox=pipe). Verificar en AWS que el LabRole lo permita.
+    PipeOutbox:
+      Type: AWS::Pipes::Pipe
+      Condition: UsarPipe
+      Properties:
+        Name: ${self:service}-${sls:stage}-outbox
+        RoleArn: arn:aws:iam::${aws:accountId}:role/LabRole
+        Source: !GetAtt Tabla.StreamArn
+        SourceParameters:
+          DynamoDBStreamParameters:
+            StartingPosition: LATEST
+            BatchSize: 1
+            MaximumRetryAttempts: 10
+          FilterCriteria:
+            Filters:
+              - Pattern: '{"eventName":["INSERT"],"dynamodb":{"Keys":{"sk":{"S":[{"prefix":"EVENTO#"}]}}}}'
+        Target: arn:aws:events:${aws:region}:${aws:accountId}:event-bus/${self:custom.busName}
+        TargetParameters:
+          InputTemplate: '<$.dynamodb.NewImage.detail.S>'
+          EventBridgeEventBusParameters:
+            Source: '$.dynamodb.NewImage.source.S'
+            DetailType: '$.dynamodb.NewImage.detailType.S'
+
+    # --- Consumidor ---------------------------------------------------------------
+    ColaEventosDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: nubeduca-${sls:stage}-evaluaciones-eventos-dlq
+        MessageRetentionPeriod: 1209600
+
+    ColaEventos:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: nubeduca-${sls:stage}-evaluaciones-eventos
+        VisibilityTimeout: 120
+        RedrivePolicy:
+          deadLetterTargetArn: !GetAtt ColaEventosDLQ.Arn
+          maxReceiveCount: 5
+
+    ReglaConsumidor:
+      Type: AWS::Events::Rule
+      Properties:
+        Name: nubeduca-${sls:stage}-evaluaciones
+        EventBusName: ${self:custom.busName}
+        EventPattern:
+          source: [lms.courses, lms.content]
+          detail-type:
+            - lms.courses.enrollment.created.v1
+            - lms.courses.enrollment.dropped.v1
+            - lms.content.file.scanned.v1
+        Targets:
+          - Id: cola-evaluaciones
+            Arn: !GetAtt ColaEventos.Arn
+
+    PoliticaColaEventos:
+      Type: AWS::SQS::QueuePolicy
+      Properties:
+        Queues: [!Ref ColaEventos]
+        PolicyDocument:
+          Statement:
+            - Effect: Allow
+              Principal: { Service: events.amazonaws.com }
+              Action: sqs:SendMessage
+              Resource: !GetAtt ColaEventos.Arn
+              Condition:
+                ArnEquals:
+                  aws:SourceArn: !GetAtt ReglaConsumidor.Arn
+
+    # PLT-06: alarma si algún evento termina en la DLQ (falló 5 veces).
+    AlarmaDLQ:
+      Type: AWS::CloudWatch::Alarm
+      Properties:
+        AlarmName: nubeduca-${sls:stage}-evaluaciones-eventos-dlq
+        AlarmDescription: Hay eventos que ms-evaluaciones no pudo procesar
+        Namespace: AWS/SQS
+        MetricName: ApproximateNumberOfMessagesVisible
+        Dimensions:
+          - Name: QueueName
+            Value: !GetAtt ColaEventosDLQ.QueueName
+        Statistic: Maximum
+        Period: 60
+        EvaluationPeriods: 1
+        Threshold: 1
+        ComparisonOperator: GreaterThanOrEqualToThreshold
+        TreatMissingData: notBreaching
+
+    # URL de la API para el frontend (infra/frontend de nubeduca-backend la lee de aquí).
+    ApiUrlParam:
+      Type: AWS::SSM::Parameter
+      Properties:
+        Name: /nubeduca/${sls:stage}/api/evaluaciones/url
+        Type: String
+        Value: !Join ['', ['https://', !Ref ApiGatewayRestApi, '.execute-api.${aws:region}.amazonaws.com/${sls:stage}']]
+
+  Outputs:
+    TablaNombre:
+      Value: !Ref Tabla
+    ColaEventosUrl:
+      Value: !Ref ColaEventos
+    ApiUrl:
+      Value: !Join ['', ['https://', !Ref ApiGatewayRestApi, '.execute-api.${aws:region}.amazonaws.com/${sls:stage}']]
