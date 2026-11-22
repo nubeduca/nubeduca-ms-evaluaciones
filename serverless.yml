@@ -2,7 +2,7 @@ service: nubeduca-ms-evaluaciones
 
 params:
   default:
-    outbox: lambda
+    outbox: pipe
     authMode: mock
 
 custom:
@@ -111,7 +111,7 @@ resources:
           AttributeName: ttl
           Enabled: true
 
-    # Outbox con EventBridge Pipes (outbox=pipe). Verificar en AWS que el LabRole lo permita.
+    # Outbox con EventBridge Pipes (por defecto, ADR-008). Verificado con LabRole en dev y staging.
     PipeOutbox:
       Type: AWS::Pipes::Pipe
       Condition: UsarPipe
